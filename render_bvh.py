@@ -55,49 +55,28 @@ def import_bvh(filepath, fps=30):
 
 
 def create_bone_geometry(armature):
-    """Create a stick-figure mesh with edges between joints, animated via hooks.
+    """Create a stick-figure mesh deformed by the armature.
 
-    Creates empties parented to each bone head (for position tracking),
-    then builds a single mesh with vertices at joint positions connected
-    by edges. HOOK modifiers on each vertex track the corresponding empty,
-    so the mesh always shows correct joint-to-joint connections.
+    Uses vertex groups + Armature modifier (standard Blender deformation).
+    Each vertex is placed at a bone's HEAD rest position and weighted 100%
+    to that bone. Since the HEAD is the rotation pivot, the vertex always
+    follows the bone's animated HEAD position through the full parent chain.
 
-    Also adds small spheres at each joint for visual reference.
+    Modifier stack: Armature (deform vertices) → Skin (generate tubes) → Subdiv (smooth).
     """
     bone_mat = bpy.data.materials.new("BoneMaterial")
     bone_mat.diffuse_color = (0.2, 0.8, 1.0, 1.0)  # Cyan
 
-    # Collect bone names in order and create empties
-    bone_names = [bone.name for bone in armature.data.bones]
-    bone_empties = {}
-
-    for bone in armature.data.bones:
-        empty = bpy.data.objects.new(f"empty_{bone.name}", None)
-        empty.empty_display_size = 0.001
-        empty.empty_display_type = 'PLAIN_AXES'
-        bpy.context.collection.objects.link(empty)
-        empty.parent = armature
-        empty.parent_type = 'BONE'
-        empty.parent_bone = bone.name
-        empty.location = (0, 0, 0)
-        bone_empties[bone.name] = empty
-
-    # Build the skeleton connections as edges.
-    # Only draw the main stick-figure connections (skip intermediate bones
-    # like Spine1, LeftShoulder that create visual clutter).
+    # Simplified skeleton connections (skip intermediate bones like Spine1, LeftShoulder)
     STICK_CONNECTIONS = [
-        # Spine (single line from hips to shoulder center)
         ("Hips", "Spine2"),
-        # Head
         ("Spine2", "Head"),
-        # Arms (shoulder → elbow → wrist)
         ("Spine2", "LeftArm"),
         ("LeftArm", "LeftForeArm"),
         ("LeftForeArm", "LeftHand"),
         ("Spine2", "RightArm"),
         ("RightArm", "RightForeArm"),
         ("RightForeArm", "RightHand"),
-        # Legs (hip → knee → ankle)
         ("Hips", "LeftUpLeg"),
         ("LeftUpLeg", "LeftLeg"),
         ("LeftLeg", "LeftFoot"),
@@ -106,12 +85,12 @@ def create_bone_geometry(armature):
         ("RightLeg", "RightFoot"),
     ]
 
-    # Filter to only bones that exist in the armature
+    bone_names = [bone.name for bone in armature.data.bones]
     bone_set = set(bone_names)
     connections = [(a, b) for a, b in STICK_CONNECTIONS
                    if a in bone_set and b in bone_set]
 
-    # Collect unique vertex names and build index map
+    # Collect unique vertex names
     vert_names = []
     vert_idx = {}
     for a, b in connections:
@@ -120,20 +99,15 @@ def create_bone_geometry(armature):
                 vert_idx[name] = len(vert_names)
                 vert_names.append(name)
 
-    # Evaluate frame 1 to get initial vertex positions
-    scene = bpy.context.scene
-    scene.frame_set(scene.frame_start)
-    bpy.context.view_layer.update()
-
+    # REST pose bone head positions in armature local space
     verts = []
     for name in vert_names:
-        bone = armature.pose.bones[name]
-        head_world = armature.matrix_world @ bone.head
-        verts.append((head_world.x, head_world.y, head_world.z))
+        bone = armature.data.bones[name]
+        head = bone.head_local  # Rest pose head in armature space
+        verts.append((head.x, head.y, head.z))
 
     edges = [(vert_idx[a], vert_idx[b]) for a, b in connections]
 
-    # Create the stick-figure mesh
     mesh = bpy.data.meshes.new("StickFigure")
     mesh.from_pydata(verts, edges, [])
     mesh.update()
@@ -141,7 +115,25 @@ def create_bone_geometry(armature):
     stick_obj = bpy.data.objects.new("StickFigure", mesh)
     bpy.context.collection.objects.link(stick_obj)
 
-    # Give it thickness with a skin modifier + subdivision for smooth joints
+    # Parent to armature so mesh lives in armature local space
+    stick_obj.parent = armature
+    stick_obj.matrix_parent_inverse.identity()
+
+    stick_obj.data.materials.append(bone_mat)
+
+    # Vertex groups: each vertex weighted 100% to its bone
+    for i, name in enumerate(vert_names):
+        vg = stick_obj.vertex_groups.new(name=name)
+        vg.add([i], 1.0, 'REPLACE')
+
+    # Modifier stack (order matters):
+    # 1. Armature — deforms vertex positions to match animated bone heads
+    # 2. Skin — generates tube geometry from the deformed wireframe
+    # 3. Subdiv — smooths the tube mesh
+    arm_mod = stick_obj.modifiers.new("Armature", 'ARMATURE')
+    arm_mod.object = armature
+    arm_mod.use_vertex_groups = True
+
     skin_mod = stick_obj.modifiers.new("Skin", 'SKIN')
     skin_mod.use_smooth_shade = True
 
@@ -149,25 +141,9 @@ def create_bone_geometry(armature):
     sub_mod.levels = 1
     sub_mod.render_levels = 1
 
-    # Set skin radius for all vertices
     bone_radius = 0.015
     for v in stick_obj.data.skin_vertices[0].data:
         v.radius = (bone_radius, bone_radius)
-
-    # Apply material
-    stick_obj.data.materials.append(bone_mat)
-
-    # Add HOOK modifier per vertex → each vertex follows its joint empty
-    for i, name in enumerate(vert_names):
-        empty = bone_empties[name]
-
-        # Create a vertex group for this vertex
-        vg = stick_obj.vertex_groups.new(name=f"hook_{name}")
-        vg.add([i], 1.0, 'REPLACE')
-
-        hook = stick_obj.modifiers.new(f"hook_{name}", 'HOOK')
-        hook.object = empty
-        hook.vertex_group = vg.name
 
 
 def add_ground_plane(center, size):
