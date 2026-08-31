@@ -1,30 +1,22 @@
 {
   "name": "mocap-ts",
   "version": "0.1.0",
-  "description": "Video to BVH motion capture \u2014 pure TypeScript, commercially licensed",
-  "type": "module",
-  "main": "dist/pipeline.js",
-  "bin": {
-    "mocap-ts": "dist/cli.js"
-  },
-  "scripts": {
-    "build": "tsc",
-    "test": "vitest run",
-    "test:watch": "vitest",
-    "start": "node dist/cli.js"
-  },
+  "private": true,
+  "description": "Video → BVH motion capture workspace. Pure-TypeScript mocap core + a Notion-style web frontend.",
+  "license": "MIT",
+  "packageManager": "pnpm@9.0.0",
   "engines": {
     "node": ">=20"
   },
-  "license": "MIT",
-  "devDependencies": {
-    "typescript": "^5.7.0",
-    "vitest": "^3.0.0",
-    "@types/node": "^22.0.0"
+  "scripts": {
+    "build": "pnpm -r run build",
+    "test": "pnpm -r run test",
+    "dev": "pnpm --filter @mocap-ts/web dev",
+    "lint": "pnpm -r run lint",
+    "clean": "pnpm -r run clean && rm -rf node_modules"
   },
-  "dependencies": {
-    "@tensorflow/tfjs-node": "^4.22.0",
-    "@tensorflow-models/pose-detection": "^2.1.3"
+  "devDependencies": {
+    "typescript": "^5.7.0"
   },
   "pnpm": {
     "onlyBuiltDependencies": [

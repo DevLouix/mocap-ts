@@ -1,3 +1,35 @@
+# dependencies
 node_modules/
+.pnpm-store/
+
+# build outputs
 dist/
 *.js.map
+*.d.ts.map
+
+# next.js
+.next/
+out/
+external
+
+# uploads / job data (local dev only)
+uploads/
+jobs/
+*.local
+
+# env
+.env
+.env.*
+!.env.example
+
+# logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# os/editor
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp

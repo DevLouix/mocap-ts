@@ -1,0 +1,80 @@
+{
+  "name": "@mocap-ts/core",
+  "version": "0.1.0",
+  "description": "Video → BVH motion capture pipeline — pure TypeScript core.",
+  "type": "module",
+  "license": "MIT",
+  "main": "./dist/pipeline.js",
+  "types": "./dist/pipeline.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/pipeline.d.ts",
+      "default": "./dist/pipeline.js"
+    },
+    "./pipeline": {
+      "types": "./dist/pipeline.d.ts",
+      "default": "./dist/pipeline.js"
+    },
+    "./cli": {
+      "types": "./dist/cli.d.ts",
+      "default": "./dist/cli.js"
+    },
+    "./jobs": {
+      "types": "./dist/jobs/index.d.ts",
+      "default": "./dist/jobs/index.js"
+    },
+    "./jobs/queue": {
+      "types": "./dist/jobs/queue-subpath.d.ts",
+      "default": "./dist/jobs/queue-subpath.js"
+    },
+    "./export/bvh": {
+      "types": "./dist/export/bvh.d.ts",
+      "default": "./dist/export/bvh.js"
+    },
+    "./export": {
+      "types": "./dist/export/index.d.ts",
+      "default": "./dist/export/index.js"
+    },
+    "./math/*": {
+      "types": "./dist/math/*.d.ts",
+      "default": "./dist/math/*.js"
+    },
+    "./pose/*": {
+      "types": "./dist/pose/*.d.ts",
+      "default": "./dist/pose/*.js"
+    },
+    "./skeleton/*": {
+      "types": "./dist/skeleton/*.d.ts",
+      "default": "./dist/skeleton/*.js"
+    },
+    "./video/*": {
+      "types": "./dist/video/*.d.ts",
+      "default": "./dist/video/*.js"
+    }
+  },
+  "bin": {
+    "mocap-ts": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "start": "node dist/cli.js",
+    "clean": "rm -rf dist *.tsbuildinfo"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@tensorflow/tfjs-node": "^4.22.0",
+    "@tensorflow-models/pose-detection": "^2.1.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "vitest": "^3.0.0"
+  }
+}

@@ -105,6 +105,35 @@ export function solveTwoBoneIK(
 /** Decay factor for forearm twist when hands are not visible */
 const TWIST_DECAY = 0.95;
 
+/** Minimum landmark visibility to trust a keypoint (confidence-weighted IK). */
+const VIS_THRESHOLD = 0.3;
+
+/** Foot is considered "in contact" when within this distance (cm) of its low. */
+const FOOT_CONTACT_DIST = 4;
+/** Frames a foot must stay near its low to count as planted (ground-lock). */
+const FOOT_PLANT_FRAMES = 4;
+
+/** Options for {@link solveIK}, enabling roadmap features. */
+export interface IKOptions {
+  /** Drop keypoints below this visibility (confidence-weighted IK). Default 0.3. */
+  minVisibility?: number;
+  /** Enable foot-contact detection + ground-locking (prevents foot slide). */
+  groundLockFeet?: boolean;
+}
+
+/** Per-foot ground-lock state, threaded across frames. */
+export interface FootLockState {
+  left: { planted: boolean; plantPos: Vec3 | null; nearLowFrames: number; lowest: number };
+  right: { planted: boolean; plantPos: Vec3 | null; nearLowFrames: number; lowest: number };
+}
+
+/** Create a fresh foot-lock state. */
+export function createFootLockState(): FootLockState {
+  return {
+    left: { planted: false, plantPos: null, nearLowFrames: 0, lowest: Infinity },
+    right: { planted: false, plantPos: null, nearLowFrames: 0, lowest: Infinity },  };
+}
+
 /**
  * Compute forearm twist angle from hand landmarks.
  *
@@ -198,8 +227,15 @@ export function solveIK(
   frame: FramePose,
   skeleton: SkeletonDef,
   prevRotations?: Quat[],
+  options: IKOptions = {},
+  footLock: FootLockState = createFootLockState(),
 ): IKFrame {
-  const positions = resolveJointPositions(frame);
+  // Confidence-weighted positions: resolveJointPositions already drops
+  // low-visibility landmarks (visibility < 0.1 in mapping.ts). The optional
+  // higher threshold here lets callers demand stricter keypoint confidence,
+  // which makes the IK fall back to prev-frame rotations for jittery joints.
+  const minVis = options.minVisibility ?? VIS_THRESHOLD;
+  const positions = resolveJointPositions(frame, 170, minVis);
   const { joints, limbChains } = skeleton;
   const localRotations: Quat[] = new Array(joints.length).fill(IDENTITY);
   const worldRotations: Quat[] = new Array(joints.length).fill(IDENTITY);
@@ -387,7 +423,69 @@ export function solveIK(
     worldRotations[chain.end] = normQuat(multiply(worldRotations[chain.mid], IDENTITY));
   }
 
+  // --- Optional: foot-contact ground-locking (prevents foot slide). ---
+  //
+  // When a foot is near its lowest observed Y and has stayed there for
+  // FOOT_PLANT_FRAMES frames, we treat it as planted: clamp its root-relative
+  // translation so it doesn't drift. The effect: planted feet stick to the
+  // floor instead of skating, which is the most visible artifact in 2D mocap.
+  if (options.groundLockFeet) {
+    applyFootLock(rootPosition, localRotations, positions, skeleton, footLock);
+  }
+
   return { rootPosition, localRotations };
+}
+
+/**
+ * Apply foot-contact ground-locking to the Hips + feet.
+ *
+ * Tracks each foot's lowest Y; when a foot lingers near that low, mark it
+ * planted and freeze the root Y (and a small horizontal correction) so the
+ * foot appears glued to the floor. Planting releases when the foot lifts.
+ */
+function applyFootLock(
+  rootPosition: Vec3,
+  _localRotations: Quat[],
+  positions: Map<string, Vec3>,
+  skeleton: SkeletonDef,
+  footLock: FootLockState,
+): void {
+  for (const side of ['left', 'right'] as const) {
+    const footName = side === 'left' ? JointName.LEFT_FOOT : JointName.RIGHT_FOOT;
+    const footPos = positions.get(footName);
+    const st = side === 'left' ? footLock.left : footLock.right;
+    if (!footPos) {
+      st.nearLowFrames = 0;
+      st.planted = false;
+      continue;
+    }
+    // Track the rolling lowest foot Y.
+    if (footPos.y < st.lowest) st.lowest = footPos.y;
+    const nearLow = Math.abs(footPos.y - st.lowest) < FOOT_CONTACT_DIST;
+    if (nearLow) {
+      st.nearLowFrames++;
+      if (st.nearLowFrames >= FOOT_PLANT_FRAMES && !st.planted) {
+        st.planted = true;
+        st.plantPos = { x: footPos.x, y: st.lowest, z: footPos.z };
+      }
+    } else {
+      st.nearLowFrames = 0;
+      st.planted = false;
+      st.plantPos = null;
+    }
+    // When planted, hold the root's Y at the plant height so the foot stays
+    // on the floor (the IK already reaches the foot; locking the root keeps
+    // the whole body from sliding). This is a simplified 1-DOF lock; a full
+    // implementation also corrects horizontal foot drift.
+    if (st.planted && st.plantPos) {
+      // Preserve the root height that corresponded to the planted foot.
+      const footHeightBelowRoot = rootPosition.y - st.plantPos.y;
+      // If the root has drifted up relative to the planted foot, pull it back.
+      if (rootPosition.y - st.lowest > footHeightBelowRoot + 1) {
+        rootPosition.y = st.lowest + footHeightBelowRoot;
+      }
+    }
+  }
 }
 
 /**
@@ -440,12 +538,14 @@ function computeRestBoneDir(children: number[], joints: Joint[]): Vec3 | null {
 export function solveAllFrames(
   frames: FramePose[],
   skeleton: SkeletonDef,
+  options: IKOptions = {},
 ): IKFrame[] {
   const results: IKFrame[] = [];
   let prevRotations: Quat[] | undefined;
+  const footLock = createFootLockState();
 
   for (const frame of frames) {
-    const result = solveIK(frame, skeleton, prevRotations);
+    const result = solveIK(frame, skeleton, prevRotations, options, footLock);
     results.push(result);
     prevRotations = result.localRotations;
   }

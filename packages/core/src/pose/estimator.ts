@@ -36,11 +36,19 @@ const COCO_TO_BLAZEPOSE: Record<number, number> = {
 export interface EstimatorOptions {
   hands?: boolean;
   verbose?: boolean;
+  /** Enable multi-person tracking (MoveNet MultiPose). Default false. */
+  multipose?: boolean;
+  /** Max people to detect per frame when multipose is on. Default 6. */
+  maxPoses?: number;
+  /** Backend: 'cpu' (tfjs-node default) or 'webgpu' (browser). Default 'cpu'. */
+  backend?: 'cpu' | 'webgpu';
 }
 
 export interface Estimator {
   estimateFrame(imagePath: string, frameIndex: number): Promise<FramePose>;
   estimateFrameFromBuffer(buffer: Uint8Array, width: number, height: number, frameIndex: number): Promise<FramePose>;
+  /** Multi-person variant: returns one FramePose per detected person. */
+  estimateFrameMulti?(imagePath: string, frameIndex: number): Promise<FramePose[]>;
   close(): void;
 }
 
@@ -61,14 +69,34 @@ export async function createEstimator(options: EstimatorOptions = {}): Promise<E
     console.error('[mocap-ts] Warning: Hand detection not available with MoveNet (ignored)');
   }
 
+  // WebGPU backend option (experimental). In tfjs-node we default to CPU,
+  // which uses the libtensorflow C++ kernels. WebGPU is for browser runs.
+  if (options.backend === 'webgpu') {
+    try {
+      // Optional backend: not a hard dep, so the module is only resolved
+      // at runtime when the user installs @tensorflow/tfjs-webgpu.
+      await import('@tensorflow/tfjs-webgpu').catch(() => {});
+      await tf.setBackend('webgpu');
+      await tf.ready();
+      if (options.verbose) console.error('[mocap-ts] WebGPU backend ready');
+    } catch {
+      console.error('[mocap-ts] WebGPU backend unavailable, falling back to CPU');
+    }
+  }
+
+  const modelType = options.multipose
+    ? poseDetection.movenet.modelType.MULTIPOSE_LIGHTNING
+    : poseDetection.movenet.modelType.SINGLEPOSE_THUNDER;
+
   const poseDetector = await poseDetection.createDetector(
     poseDetection.SupportedModels.MoveNet,
     {
-      modelType: poseDetection.movenet.modelType.SINGLEPOSE_THUNDER,
+      modelType,
+      ...(options.multipose ? { multiPoseMaxDimension: 257, enableTracking: true, maxPoses: options.maxPoses ?? 6 } : {}),
     },
   );
 
-  if (options.verbose) console.error('[mocap-ts] Estimator ready');
+  if (options.verbose) console.error(`[mocap-ts] Estimator ready (${options.multipose ? 'multipose' : 'singlepose'})`);
 
   function cocoToBlazePose(
     keypoints: poseDetection.Keypoint[],
@@ -136,9 +164,27 @@ export async function createEstimator(options: EstimatorOptions = {}): Promise<E
     return { body, frameIndex };
   }
 
+  /** Multi-person: one FramePose per detected person, with a person id tag. */
+  async function estimateFrameMulti(imagePath: string, frameIndex: number): Promise<FramePose[]> {
+    const imageBuffer = readFileSync(imagePath);
+    const tensor = tf.node.decodeImage(imageBuffer, 3) as tf.Tensor3D;
+    try {
+      const poses = await poseDetector.estimatePoses(tensor);
+      return poses.map((p, idx) => ({
+        body: p.keypoints ? cocoToBlazePose(p.keypoints, tensor.shape[1], tensor.shape[0]) : [],
+        frameIndex,
+        // Stash the MoveNet-assigned person id so callers can correlate
+        // across frames. MoveNet MultiPose assigns `id`; fall back to idx.
+        ...({ personId: (p as { id?: number }).id ?? idx }),
+      })) as unknown as FramePose[];
+    } finally {
+      tensor.dispose();
+    }
+  }
+
   function close(): void {
     poseDetector.dispose();
   }
 
-  return { estimateFrame, estimateFrameFromBuffer, close };
+  return { estimateFrame, estimateFrameFromBuffer, estimateFrameMulti, close };
 }

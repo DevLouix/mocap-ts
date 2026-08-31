@@ -1,0 +1,81 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * Notion-inspired base layer.
+ *
+ * These are the cross-app primitives: background, text color, focus ring,
+ * selection, and the thin scrollbars Notion uses. App-specific component
+ * styles live next to their components, not here.
+ */
+
+@layer base {
+  :root {
+    --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+
+  * {
+    border-color: theme('colors.border.DEFAULT');
+  }
+
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+
+  body {
+    background-color: theme('colors.surface.DEFAULT');
+    color: theme('colors.ink.DEFAULT');
+    font-family: theme('fontFamily.sans');
+    font-feature-settings: 'cv11', 'ss01', 'ss03';
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Notion-style focus ring: a thin accent ring, not the browser default. */
+  :focus-visible {
+    outline: 2px solid theme('colors.accent.DEFAULT');
+    outline-offset: 1px;
+    border-radius: theme('borderRadius.sm');
+  }
+
+  /* Selection uses the accent at low opacity — Notion's behavior. */
+  ::selection {
+    background-color: theme('colors.accent.subtle');
+    color: theme('colors.ink.DEFAULT');
+  }
+
+  /* Thin, unobtrusive scrollbars. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: theme('colors.border.strong') transparent;
+  }
+  *::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  *::-webkit-scrollbar-thumb {
+    background-color: theme('colors.border.strong');
+    border-radius: 4px;
+  }
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}
+
+@layer components {
+  /* The "callout" block Notion uses for tips/warnings. */
+  .notion-callout {
+    @apply flex gap-2 rounded-md border border-border bg-surface-subtle p-3 text-sm text-ink;
+  }
+
+  /* The dashed dropzone border. */
+  .notion-dropzone {
+    @apply rounded-lg border-2 border-dashed border-border-strong bg-surface-subtle transition-colors;
+  }
+  .notion-dropzone--active {
+    @apply border-accent bg-accent-subtle;
+  }
+}

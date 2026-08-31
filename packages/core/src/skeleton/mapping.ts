@@ -72,10 +72,10 @@ function landmarkToVec3(lm: Landmark, scale: number = 170): Vec3 {
 /**
  * Get the world-space position of a skeleton joint from a frame's body landmarks.
  */
-export function getJointPosition(mapping: JointMapping, body: Landmark[], scale: number = 170): Vec3 | null {
+export function getJointPosition(mapping: JointMapping, body: Landmark[], scale: number = 170, minVisibility: number = 0.1): Vec3 | null {
   if (typeof mapping.landmarks === 'number') {
     const lm = body[mapping.landmarks];
-    if (!lm || lm.visibility < 0.1) return null;
+    if (!lm || lm.visibility < minVisibility) return null;
     return landmarkToVec3(lm, scale);
   }
 
@@ -88,7 +88,7 @@ export function getJointPosition(mapping: JointMapping, body: Landmark[], scale:
 
   for (let i = 0; i < indices.length; i++) {
     const lm = body[indices[i]];
-    if (!lm || lm.visibility < 0.1) continue;
+    if (!lm || lm.visibility < minVisibility) continue;
     const w = weights[i] * lm.visibility;
     const pos = landmarkToVec3(lm, scale);
     x += pos.x * w;
@@ -111,13 +111,13 @@ export function getJointPosition(mapping: JointMapping, body: Landmark[], scale:
  *
  * This is the same approach as extract_root_translation() in our Python pipeline.
  */
-function computeRootFromImageSpace(body: Landmark[], scale: number): Vec3 | null {
+function computeRootFromImageSpace(body: Landmark[], scale: number, minVisibility: number = 0.1): Vec3 | null {
   const lHip = body[BodyLandmark.LEFT_HIP];
   const rHip = body[BodyLandmark.RIGHT_HIP];
   const lShoulder = body[BodyLandmark.LEFT_SHOULDER];
   const rShoulder = body[BodyLandmark.RIGHT_SHOULDER];
 
-  if (!lHip || !rHip || lHip.visibility < 0.1 || rHip.visibility < 0.1) {
+  if (!lHip || !rHip || lHip.visibility < minVisibility || rHip.visibility < minVisibility) {
     return null;
   }
 
@@ -160,18 +160,19 @@ function computeRootFromImageSpace(body: Landmark[], scale: number): Vec3 | null
 export function resolveJointPositions(
   frame: FramePose,
   scale: number = 170,
+  minVisibility: number = 0.1,
 ): Map<string, Vec3> {
   const positions = new Map<string, Vec3>();
 
   for (const mapping of BODY_JOINT_MAPPINGS) {
-    const pos = getJointPosition(mapping, frame.body, scale);
+    const pos = getJointPosition(mapping, frame.body, scale, minVisibility);
     if (pos) {
       positions.set(mapping.joint, pos);
     }
   }
 
   // Override Hips position with image-space root translation
-  const rootPos = computeRootFromImageSpace(frame.body, scale);
+  const rootPos = computeRootFromImageSpace(frame.body, scale, minVisibility);
   if (rootPos) {
     positions.set(JointName.HIPS, rootPos);
   }
