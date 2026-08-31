@@ -14,7 +14,6 @@ external
 
 # uploads / job data (local dev only)
 uploads/
-jobs/
 *.local
 
 # env
