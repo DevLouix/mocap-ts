@@ -1,6 +1,6 @@
 import type { JobQueue } from './queue.js';
 import { FileJobQueue } from './queue.js';
-import type { Job, JobSummary, JobSettings, JobSource } from './types.js';
+import type { Job, JobSummary, JobSettings, JobSource, JobTenantContext } from './types.js';
 import { JobStage } from './types.js';
 import { jobLabel, stageMessage } from './types.js';
 
@@ -38,32 +38,37 @@ export class InngestJobQueue implements JobQueue {
     this.sendEvent = opts.sendEvent;
   }
 
-  enqueue(source: JobSource, settings: JobSettings): Job {
-    const job = this.file.enqueue(source, settings);
-    // Fire the Inngest event so the registered function picks it up.
-    // Non-blocking: if Inngest is unreachable, the job stays queued and the
-    // local worker loop (if running) will claim it as a fallback.
+  enqueue(source: JobSource, settings: JobSettings, tenant?: JobTenantContext): Job {
+    return this.file.enqueue(source, settings, tenant);
+  }
+
+  dispatch(id: string): void {
+    const job = this.file.get(id);
+    if (!job) return;
+    // Dispatch only after the API has persisted all source fields, including
+    // an uploaded file path. This avoids durable workers claiming incomplete
+    // upload jobs.
     void this.sendEvent(job.id, {
       jobId: job.id,
-      source,
-      settings,
+      source: job.source,
+      settings: job.settings,
     }).catch(() => {
-      // Mark the job as still queued; the file store's acquireNext will
-      // eventually claim it locally if a worker is running.
+      // The durable provider will retry delivery; the record remains queued.
     });
-    return job;
   }
 
   // The remaining methods delegate to the file store so the API surface is
   // identical regardless of provider.
-  acquireNext(): Job | null { return this.file.acquireNext(); }
+  acquireNext(id?: string): Job | null { return this.file.acquireNext(id); }
   update(id: string, patch: Partial<Pick<Job, 'stage' | 'progress' | 'message' | 'outputName' | 'outputBvhPath' | 'finishedAt'>>): Job {
     return this.file.update(id, patch);
   }
   fail(id: string, error: string): Job { return this.file.fail(id, error); }
+  patchSource(id: string, patch: Partial<JobSource>): Job { return this.file.patchSource(id, patch); }
   cancel(id: string): Job { return this.file.cancel(id); }
-  get(id: string): Job | null { return this.file.get(id); }
-  list(): JobSummary[] { return this.file.list(); }
+  isCancellationRequested(id: string): boolean { return this.file.isCancellationRequested(id); }
+  get(id: string, workspaceId?: string): Job | null { return this.file.get(id, workspaceId); }
+  list(workspaceId?: string): JobSummary[] { return this.file.list(workspaceId); }
   remove(id: string): void { this.file.remove(id); }
 }
 

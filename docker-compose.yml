@@ -1,0 +1,141 @@
+# Self-hosted mocap-ts durable platform.
+#
+#   docker compose up --build
+#   open http://localhost:3000
+#
+# The web service is the control plane. The worker is a separate processing
+# plane, while PostgreSQL, Redis, and MinIO provide durable local services.
+# Job metadata lives in PostgreSQL and media/artifacts live in MinIO.
+
+x-platform-env: &platform-env
+  MOCAP_PERSISTENCE: durable
+  MOCAP_WORKER_MODE: durable
+  MOCAP_AUTH_MODE: ${MOCAP_AUTH_MODE:-local}
+  MOCAP_AUTH_HEADER_SECRET: ${MOCAP_AUTH_HEADER_SECRET:-}
+  MOCAP_VERBOSE: ${MOCAP_VERBOSE:-0}
+  MOCAP_QUEUE_NAME: ${MOCAP_QUEUE_NAME:-mocap-motion-processing}
+  MOCAP_LEASE_SECONDS: ${MOCAP_LEASE_SECONDS:-300}
+  MOCAP_REAPER_INTERVAL_MS: ${MOCAP_REAPER_INTERVAL_MS:-30000}
+  DATABASE_URL: postgres://mocap:mocap@postgres:5432/mocap
+  REDIS_URL: redis://redis:6379
+  S3_ENDPOINT: http://minio:9000
+  S3_PUBLIC_ENDPOINT: ${S3_PUBLIC_ENDPOINT:-http://localhost:9000}
+  S3_REGION: us-east-1
+  S3_BUCKET: ${S3_BUCKET:-mocap}
+  S3_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-mocapadmin}
+  S3_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-mocapadminsecret}
+  S3_FORCE_PATH_STYLE: "true"
+  MOCAP_LOCAL_ORGANIZATION_ID: ${MOCAP_LOCAL_ORGANIZATION_ID:-local-organization}
+  MOCAP_LOCAL_WORKSPACE_ID: ${MOCAP_LOCAL_WORKSPACE_ID:-local-workspace}
+  MOCAP_LOCAL_USER_ID: ${MOCAP_LOCAL_USER_ID:-local-user}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: mocap
+      POSTGRES_USER: mocap
+      POSTGRES_PASSWORD: mocap
+    volumes:
+      - mocap-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mocap -d mocap"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - mocap-redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-mocapadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-mocapadminsecret}
+    volumes:
+      - mocap-minio:/data
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-mocapadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-mocapadminsecret}
+      S3_BUCKET: ${S3_BUCKET:-mocap}
+    volumes:
+      - ./minio-cors.json:/config/cors.json:ro
+    entrypoint: ["/bin/sh", "-c"]
+    command: >-
+      "mc alias set local http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD &&
+       mc mb --ignore-existing local/$$S3_BUCKET &&
+       mc cors set local/$$S3_BUCKET /config/cors.json"
+    restart: "no"
+
+  web:
+    build: .
+    image: mocap-ts:latest
+    ports:
+      - "3000:3000"
+    environment:
+      <<: *platform-env
+      MOCAP_DATA_DIR: /data
+    volumes:
+      - mocap-data:/data
+      # Optional YouTube cookies; keep cookies.txt out of git.
+      # - ./cookies.txt:/data/cookies.txt:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  worker:
+    image: mocap-ts:latest
+    command: ["node", "/app/apps/worker/dist/index.js"]
+    environment:
+      <<: *platform-env
+      MOCAP_WORK_DIR: /tmp/mocap-worker
+      MOCAP_WORKER_CONCURRENCY: ${MOCAP_WORKER_CONCURRENCY:-1}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+volumes:
+  mocap-data:
+  mocap-postgres:
+  mocap-redis:
+  mocap-minio:

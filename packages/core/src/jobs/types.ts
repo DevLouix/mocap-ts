@@ -84,11 +84,27 @@ export const DEFAULT_JOB_SETTINGS: JobSettings = {
   smoothing: 0.7,
 };
 
+/** Tenant context attached to every submitted processing job. */
+export interface JobTenantContext {
+  organizationId: string;
+  workspaceId: string;
+  createdBy: string;
+}
+
 /** Everything the queue + worker need to know to run a job. */
 export interface Job {
   id: string;
   /** ISO timestamp the job was created. */
   createdAt: string;
+  /** Tenant boundary for every job and derived artifact. */
+  organizationId: string;
+  workspaceId: string;
+  /** Principal that submitted the job. */
+  createdBy: string;
+  /** Number of worker attempts, starting at 1 when claimed. */
+  attempt: number;
+  /** Maximum number of attempts before the job is terminally failed. */
+  maxAttempts: number;
   source: JobSource;
   settings: JobSettings;
   /** Current lifecycle stage. */
@@ -99,7 +115,7 @@ export interface Job {
   message?: string;
   /** Output filename (with .bvh). Set once the pipeline writes output. */
   outputName?: string;
-  /** Absolute path to the produced BVH on disk (worker-only, never serialized to the client). */
+  /** Absolute path to the produced motion file on disk (worker-only, never serialized to the client). */
   outputBvhPath?: string;
   /** If stage === 'failed', the error message. */
   error?: string;
@@ -107,11 +123,18 @@ export interface Job {
   finishedAt?: string;
   /** Rolling log of recent progress events (capped by the queue provider). */
   history: JobProgress[];
+  /** ISO timestamp of the current worker lease, when claimed. */
+  leasedAt?: string;
+  /** True when cancellation was requested while work was running. */
+  cancelRequested?: boolean;
 }
 
 /** A snapshot used to list jobs in the UI. Cheaper than the full Job. */
 export interface JobSummary {
   id: string;
+  organizationId: string;
+  workspaceId: string;
+  createdBy: string;
   createdAt: string;
   label: string;
   stage: JobStage;

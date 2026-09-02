@@ -1,9 +1,12 @@
 import Link from 'next/link';
 import { getQueue } from '@/server/jobs';
+import { getDurablePlatform, isDurableMode } from '@/server/durable';
 import { WorkspaceShell } from '@/components/layout/workspace-shell';
 import { JobList } from '@/components/workspace/job-list';
 import { Button } from '@/components/ui/button';
 import { Film, Inbox } from 'lucide-react';
+import { headers } from 'next/headers';
+import { requestPrincipal } from '@/server/auth';
 
 export const dynamic = 'force-dynamic';
 
@@ -11,8 +14,11 @@ export const dynamic = 'force-dynamic';
  * Home — the workspace's job inbox. Notion-style: a page title, a short
  * description, and a dense list of capture jobs with their stage + progress.
  */
-export default function HomePage() {
-  const jobs = getQueue().list();
+export default async function HomePage() {
+  const principal = requestPrincipal(await headers(), 'job:read');
+  const jobs = isDurableMode()
+    ? await getDurablePlatform().listClientJobs(principal)
+    : getQueue().list(principal.workspaceId);
 
   return (
     <WorkspaceShell active="jobs" actions={

@@ -1,6 +1,11 @@
 import { readFileSync } from 'node:fs';
 import type { Landmark, FramePose } from './types.js';
 
+// Node ≥ 23 removed util.isNullOrUndefined, which tfjs-node 4.22 still
+// calls (tfjs#8609). Import this shim FIRST so the CJS util patch is in
+// place before tfjs-node evaluates.
+import '../node-compat.js';
+
 // Register TF.js Node backend (C++ ops, no WebGL/WASM needed)
 import * as tf from '@tensorflow/tfjs-node';
 import * as poseDetection from '@tensorflow-models/pose-detection';

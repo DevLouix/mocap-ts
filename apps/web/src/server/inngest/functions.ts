@@ -43,7 +43,7 @@ export const runMocapJob = inngest.createFunction(
     // Claim the job (moves it into processing/ so a local worker won't
     // double-claim it). If the job isn't in QUEUED state, skip — Inngest
     // retries may have already started it.
-    const claimed = queue.acquireNext();
+    const claimed = queue.acquireNext(payload.jobId);
     if (!claimed || claimed.id !== job.id) {
       // Either nothing to claim, or Inngest raced with a local worker.
       return { status: 'already_running_or_done', jobId: job.id };

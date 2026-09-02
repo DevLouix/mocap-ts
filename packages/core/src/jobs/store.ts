@@ -1,5 +1,5 @@
 import { mkdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { FileJobQueue } from './queue.js';
 import type { JobQueue } from './queue.js';
 import { InngestJobQueue } from './inngest-adapter.js';
@@ -25,7 +25,10 @@ export function setInngestSender(fn: (jobId: string, payload: InngestJobPayload)
 
 /** Default data root, overridable via env for tests / container mounts. */
 function dataRoot(): string {
-  return process.env.MOCAP_DATA_DIR ?? join(process.cwd(), '.mocap');
+  // pnpm runs package scripts with each package as cwd. INIT_CWD preserves
+  // the repository directory from which the command was invoked, keeping the
+  // web process and worker on the same local queue/data root.
+  return resolve(process.env.MOCAP_DATA_DIR ?? join(process.env.INIT_CWD ?? process.cwd(), '.mocap'));
 }
 
 /**

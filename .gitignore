@@ -14,6 +14,7 @@ external
 
 # uploads / job data (local dev only)
 uploads/
+.mocap/
 *.local
 
 # env

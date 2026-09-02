@@ -27,6 +27,14 @@
       "types": "./dist/jobs/queue-subpath.d.ts",
       "default": "./dist/jobs/queue-subpath.js"
     },
+    "./workspace": {
+      "types": "./dist/workspace/index.d.ts",
+      "default": "./dist/workspace/index.js"
+    },
+    "./identity": {
+      "types": "./dist/identity/index.d.ts",
+      "default": "./dist/identity/index.js"
+    },
     "./export/bvh": {
       "types": "./dist/export/bvh.d.ts",
       "default": "./dist/export/bvh.js"

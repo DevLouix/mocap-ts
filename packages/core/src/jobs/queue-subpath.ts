@@ -10,3 +10,4 @@ export * from './types.js';
 export * from './queue.js';
 export * from './store.js';
 export * from './inngest-adapter.js';
+export * from '../identity/index.js';

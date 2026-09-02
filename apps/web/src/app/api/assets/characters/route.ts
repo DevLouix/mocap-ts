@@ -2,6 +2,8 @@ import 'server-only';
 import { NextResponse } from 'next/server';
 import { readdirSync, existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { NextRequest } from 'next/server';
+import { authResponse, requestPrincipal } from '@/server/auth';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -20,7 +22,12 @@ export const revalidate = 0;
  * For a deploy where public/ is read-only, mount a writable volume here and
  * add an upload route that writes into it (future work).
  */
-export async function GET() {
+export async function GET(req: NextRequest) {
+  try {
+    requestPrincipal(req.headers, 'asset:read');
+  } catch (err) {
+    return authResponse(err) ?? NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
   const dir = join(process.cwd(), 'public', 'assets', 'characters');
   if (!existsSync(dir)) return NextResponse.json([]);
 

@@ -1,8 +1,9 @@
 import { existsSync, mkdirSync, writeFileSync, statSync, rmSync } from 'node:fs';
-import { join, basename, extname } from 'node:path';
+import { join, basename, extname, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { CliOptions } from '../cli.js';
-import { extractFrames, loadFrameDir, isVideoUrl, downloadVideo } from '../video/decoder.js';
+import { extractFrames, loadFrameDir, downloadVideo } from '../video/decoder.js';
+import { validateRemoteVideoUrl } from '../video/url-policy.js';
 import { createEstimator } from '../pose/estimator.js';
 import { TemporalSmoother } from '../pose/smoother.js';
 import { calibrateSkeleton } from '../skeleton/calibrate.js';
@@ -61,6 +62,7 @@ const STAGE_BASE: Map<JobStage, number> = (() => {
 /** Internal adapter: a ProgressFn that patches the Job on disk. */
 function makeProgressFn(queue: JobQueue, jobId: string): ProgressFn {
   return (stage, stageProgress, detail) => {
+    if (queue.isCancellationRequested(jobId)) throw new Error('Job cancelled');
     const base = STAGE_BASE.get(stage) ?? 0;
     const weight = STAGE_WEIGHTS[stage as keyof typeof STAGE_WEIGHTS] ?? 0;
     const overall = Math.min(0.999, base + weight * Math.max(0, Math.min(1, stageProgress)));
@@ -245,8 +247,16 @@ export async function resolveJobInput(
   verbose = false,
 ): Promise<{ videoPath: string; title: string }> {
   if (job.source.kind === 'upload') {
-    return { videoPath: job.source.path, title: job.source.filename };
+    // `workDir` is the per-job directory: <data>/work/<job-id>.
+    // Uploads live beside `work/`, at <data>/uploads.
+    const uploadRoot = resolve(workDir, '..', '..', 'uploads');
+    const uploadPath = resolve(job.source.path);
+    if (uploadPath !== uploadRoot && !uploadPath.startsWith(`${uploadRoot}/`)) {
+      throw new Error('Upload path is outside the managed data directory');
+    }
+    return { videoPath: uploadPath, title: job.source.filename };
   }
+  await validateRemoteVideoUrl(job.source.url);
   onProgress(JobStage.DOWNLOADING, 0, 'fetching video metadata');
   const result = downloadVideo(job.source.url, { outDir: workDir, verbose });
   onProgress(JobStage.DOWNLOADING, 1, result.title);
@@ -266,15 +276,21 @@ export async function runJob(queue: JobQueue, job: Job, dirs: {
 }): Promise<void> {
   const onProgress = makeProgressFn(queue, job.id);
 
-  const { videoPath, title } = await resolveJobInput(job, dirs.workDir, onProgress, dirs.verbose);
+  const jobWorkDir = join(dirs.workDir, job.id);
+  const jobOutDir = join(dirs.outDir, job.id);
+  mkdirSync(jobWorkDir, { recursive: true });
+  mkdirSync(jobOutDir, { recursive: true });
+  const { videoPath, title } = await resolveJobInput(job, jobWorkDir, onProgress, dirs.verbose);
+  if (queue.isCancellationRequested(job.id)) throw new Error('Job cancelled');
   const { bvhPath, frameCount } = await runPipelineStreaming(
     videoPath,
-    dirs.outDir,
+    jobOutDir,
     job.settings,
     onProgress,
     dirs.verbose,
   );
 
+  if (queue.isCancellationRequested(job.id)) throw new Error('Job cancelled');
   queue.update(job.id, {
     stage: JobStage.DONE,
     progress: 1,
@@ -320,9 +336,13 @@ export async function startWorkerLoop(
       }
       if (dirs.verbose) console.error(`[mocap-ts worker] job ${job.id} failed: ${message}`);
     }
-    // Clean up the per-job scratch dir if it exists.
+    // Clean up scratch data after every attempt. Failed or cancelled attempts
+    // must not leave partial artifacts that a later retry could expose.
     const scratch = join(dirs.workDir, job.id);
     rmSync(scratch, { force: true, recursive: true });
+    if (queue.get(job.id)?.stage !== JobStage.DONE) {
+      rmSync(join(dirs.outDir, job.id), { force: true, recursive: true });
+    }
   }
 }
 

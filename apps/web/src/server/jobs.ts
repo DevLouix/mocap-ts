@@ -1,5 +1,5 @@
 import 'server-only';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { mkdirSync } from 'node:fs';
 import { getQueue as coreGetQueue, getJobDirs as coreGetJobDirs } from '@mocap-ts/core/jobs/queue';
 import type { JobQueue } from '@mocap-ts/core/jobs/queue';
@@ -24,9 +24,10 @@ export function getJobDirs() {
 
 /** Absolute path where an uploaded video should be saved for a given job id. */
 export function uploadPath(jobId: string, filename: string): string {
-  const root = process.env.MOCAP_DATA_DIR ?? join(process.cwd(), '.mocap');
+  const root = resolve(process.env.MOCAP_DATA_DIR ?? join(process.env.INIT_CWD ?? process.cwd(), '.mocap'));
   const dir = join(root, 'uploads');
   mkdirSync(dir, { recursive: true });
-  const ext = filename.slice(filename.lastIndexOf('.'));
-  return join(dir, `${jobId}${ext || '.mp4'}`);
+  const ext = filename.slice(filename.lastIndexOf('.')).toLowerCase();
+  const allowed = new Set(['.mp4', '.mov', '.mkv', '.webm', '.avi', '.m4v']);
+  return join(dir, `${jobId}${allowed.has(ext) ? ext : '.mp4'}`);
 }

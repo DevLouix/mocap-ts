@@ -1,6 +1,7 @@
 import { writeFileSync, statSync, existsSync } from 'node:fs';
 import type { CliOptions } from './cli.js';
 import { extractFrames, loadFrameDir, isVideoUrl, downloadVideo } from './video/decoder.js';
+import { validateRemoteVideoUrl } from './video/url-policy.js';
 import { createEstimator } from './pose/estimator.js';
 import { TemporalSmoother } from './pose/smoother.js';
 import { createSkeleton } from './skeleton/hierarchy.js';
@@ -27,6 +28,7 @@ export async function runPipeline(opts: CliOptions): Promise<void> {
 
   // Step 0: If input is a URL, download it first
   if (isVideoUrl(opts.input)) {
+    await validateRemoteVideoUrl(opts.input);
     log('Downloading video...', true);
     const { videoPath, title } = downloadVideo(opts.input, { verbose: opts.verbose });
     videoInput = videoPath;

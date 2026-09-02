@@ -1,24 +1,37 @@
 import 'server-only';
 import { NextRequest, NextResponse } from 'next/server';
-import { writeFileSync, statSync } from 'node:fs';
+import { createWriteStream, rmSync } from 'node:fs';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import { getQueue, uploadPath } from '@/server/jobs';
 import { toClientJob } from '@/lib/types';
-import { isVideoUrl } from '@mocap-ts/core/video/decoder';
 import { DEFAULT_JOB_SETTINGS, type JobSettings } from '@mocap-ts/core/jobs/queue';
+import { validateRemoteVideoUrl } from '@mocap-ts/core/video/url-policy';
+import { hasSupportedVideoSignature } from '@mocap-ts/core/video/file-policy';
+import { authResponse, requestPrincipal } from '@/server/auth';
+import { getDurablePlatform, isDurableMode } from '@/server/durable';
+
+export const runtime = 'nodejs';
+export const maxDuration = 300;
 
 const MAX_UPLOAD_BYTES = 1024 * 1024 * 1024; // 1 GB — pose estimation is the bottleneck, not size
 const ALLOWED_EXTS = new Set(['.mp4', '.mov', '.mkv', '.webm', '.avi', '.m4v']);
-const ALLOWED_URL_HOSTS_RE =
-  /^(youtube\.com|youtu\.be|vimeo\.com|streamable\.com|twitch\.tv|dailymotion\.com)$/i;
 
 /**
  * GET /api/jobs — list all jobs (newest first) as ClientJob summaries.
  */
-export async function GET() {
-  const queue = getQueue();
-  const jobs = queue.list();
-  // Summaries are already client-safe; return as-is.
-  return NextResponse.json({ jobs });
+export async function GET(req: NextRequest) {
+  try {
+    const principal = requestPrincipal(req.headers, 'job:read');
+    if (isDurableMode()) {
+      const jobs = await getDurablePlatform().listClientJobs(principal);
+      return NextResponse.json({ jobs });
+    }
+    const jobs = getQueue().list(principal.workspaceId);
+    return NextResponse.json({ jobs });
+  } catch (err) {
+    return authResponse(err) ?? NextResponse.json({ error: 'Unable to list jobs' }, { status: 500 });
+  }
 }
 
 /**
@@ -32,26 +45,81 @@ export async function GET() {
  * from the persisted job record, so the client never drives behavior directly.
  */
 export async function POST(req: NextRequest) {
-  // The worker loop is started once at server boot via instrumentation.ts,
-  // so this route stays TF-free and only touches the queue.
-  const queue = getQueue();
   const contentType = req.headers.get('content-type') ?? '';
-
   try {
+    const principal = requestPrincipal(req.headers, 'job:create');
+    if (isDurableMode()) {
+      if (contentType.startsWith('multipart/form-data')) return await handleDurableUpload(req, principal);
+      if (contentType.includes('application/json')) return await handleDurableUrl(req, principal);
+      return NextResponse.json({ error: 'Unsupported content type' }, { status: 415 });
+    }
+    const queue = getQueue();
     if (contentType.startsWith('multipart/form-data')) {
-      return await handleUpload(req, queue);
+      return await handleUpload(req, queue, principal);
     }
     if (contentType.includes('application/json')) {
-      return await handleUrl(req, queue);
+      return await handleUrl(req, queue, principal);
     }
     return NextResponse.json({ error: 'Unsupported content type' }, { status: 415 });
   } catch (err) {
-    const message = err instanceof Error ? err.message : 'Unknown error';
-    return NextResponse.json({ error: message }, { status: 400 });
+    return authResponse(err) ?? NextResponse.json({ error: err instanceof Error ? err.message : 'Unknown error' }, { status: 400 });
   }
 }
 
-async function handleUpload(req: NextRequest, queue: ReturnType<typeof getQueue>) {
+async function handleDurableUpload(req: NextRequest, principal: ReturnType<typeof requestPrincipal>) {
+  const rawContentLength = req.headers.get('content-length');
+  const contentLength = rawContentLength ? Number(rawContentLength) : 0;
+  if (rawContentLength && (!Number.isFinite(contentLength) || contentLength < 0)) {
+    return NextResponse.json({ error: 'Invalid content length' }, { status: 400 });
+  }
+  if (contentLength > MAX_UPLOAD_BYTES + 1024 * 1024) {
+    return NextResponse.json({ error: 'Request too large (max 1 GB)' }, { status: 413 });
+  }
+  const form = await req.formData();
+  const file = form.get('file');
+  if (!(file instanceof File)) return NextResponse.json({ error: 'Missing "file" field' }, { status: 400 });
+  if (file.size === 0) return NextResponse.json({ error: 'Empty file' }, { status: 400 });
+  if (file.size > MAX_UPLOAD_BYTES) return NextResponse.json({ error: 'File too large (max 1 GB)' }, { status: 413 });
+  const ext = file.name.slice(file.name.lastIndexOf('.')).toLowerCase();
+  if (!ALLOWED_EXTS.has(ext)) {
+    return NextResponse.json({ error: `Unsupported file type ${ext}. Allowed: ${[...ALLOWED_EXTS].join(', ')}` }, { status: 415 });
+  }
+  const signature = new Uint8Array(await file.slice(0, 64).arrayBuffer());
+  if (!hasSupportedVideoSignature(file.name, signature)) {
+    return NextResponse.json({ error: 'File contents do not match a supported video format' }, { status: 415 });
+  }
+  const settings = parseSettings(form);
+  const job = await getDurablePlatform().createUpload(principal, {
+    filename: file.name,
+    mimeType: file.type,
+    sizeBytes: file.size,
+    body: Readable.fromWeb(file.stream() as unknown as import('node:stream/web').ReadableStream<Uint8Array>),
+  }, settings);
+  return NextResponse.json({ job }, { status: 201 });
+}
+
+async function handleDurableUrl(req: NextRequest, principal: ReturnType<typeof requestPrincipal>) {
+  const body = await req.json().catch(() => null);
+  if (!body || typeof body.url !== 'string') return NextResponse.json({ error: 'Missing "url"' }, { status: 400 });
+  const url = body.url.trim();
+  try {
+    await validateRemoteVideoUrl(url);
+  } catch (err) {
+    return NextResponse.json({ error: err instanceof Error ? err.message : 'Invalid video URL' }, { status: 400 });
+  }
+  const job = await getDurablePlatform().createUrl(principal, url, parseSettings({ ...body }));
+  return NextResponse.json({ job }, { status: 201 });
+}
+
+async function handleUpload(req: NextRequest, queue: ReturnType<typeof getQueue>, principal: ReturnType<typeof requestPrincipal>) {
+  const rawContentLength = req.headers.get('content-length');
+  const contentLength = rawContentLength ? Number(rawContentLength) : 0;
+  if (rawContentLength && (!Number.isFinite(contentLength) || contentLength < 0)) {
+    return NextResponse.json({ error: 'Invalid content length' }, { status: 400 });
+  }
+  if (contentLength > MAX_UPLOAD_BYTES + 1024 * 1024) {
+    return NextResponse.json({ error: 'Request too large (max 1 GB)' }, { status: 413 });
+  }
   const form = await req.formData();
   const file = form.get('file');
   if (!(file instanceof File)) {
@@ -71,44 +139,63 @@ async function handleUpload(req: NextRequest, queue: ReturnType<typeof getQueue>
     );
   }
 
+  const signature = new Uint8Array(await file.slice(0, 64).arrayBuffer());
+  if (!hasSupportedVideoSignature(file.name, signature)) {
+    return NextResponse.json({ error: 'File contents do not match a supported video format' }, { status: 415 });
+  }
+
   const settings = parseSettings(form);
   // Create the job first so we have an id, then save the upload to that id's path.
   const job = queue.enqueue(
     { kind: 'upload', filename: file.name, path: '', mimeType: file.type, sizeBytes: file.size },
     settings,
+    { organizationId: principal.organizationId, workspaceId: principal.workspaceId, createdBy: principal.id },
   );
   const path = uploadPath(job.id, file.name);
-  const buf = Buffer.from(await file.arrayBuffer());
-  writeFileSync(path, buf);
-  // Patch the job with the real path now that the file is saved.
-  queue.update(job.id, { outputBvhPath: undefined });
+  try {
+    await pipeline(
+      Readable.fromWeb(file.stream() as unknown as import('node:stream/web').ReadableStream<Uint8Array>),
+      createWriteStream(path, { flags: 'wx' }),
+    );
+    // Write the concrete path back into the job source — the worker reads
+    // `source.path` to locate the video.
+    queue.patchSource(job.id, { path });
+    queue.dispatch(job.id);
+  } catch (err) {
+    rmSync(path, { force: true });
+    queue.remove(job.id);
+    throw err;
+  }
 
-  return NextResponse.json({ job: toClientJob({ ...queue.get(job.id)!, source: { kind: 'upload', filename: file.name, path, mimeType: file.type, sizeBytes: file.size } }) }, { status: 201 });
+  return NextResponse.json({ job: toClientJob(queue.get(job.id)!) }, { status: 201 });
 }
 
-async function handleUrl(req: NextRequest, queue: ReturnType<typeof getQueue>) {
+async function handleUrl(req: NextRequest, queue: ReturnType<typeof getQueue>, principal: ReturnType<typeof requestPrincipal>) {
   const body = await req.json().catch(() => null);
   if (!body || typeof body.url !== 'string') {
     return NextResponse.json({ error: 'Missing "url"' }, { status: 400 });
   }
   const url = body.url.trim();
-  if (!isVideoUrl(url)) {
-    return NextResponse.json({ error: 'Not a valid URL' }, { status: 400 });
-  }
-  let host: string;
   try {
-    host = new URL(url).hostname.replace(/^www\./, '');
-  } catch {
-    return NextResponse.json({ error: 'Invalid URL' }, { status: 400 });
-  }
-  // Loosen the host allowlist: yt-dlp supports many sites, but we still
-  // reject obvious non-video URLs to avoid surprise workloads.
-  if (!ALLOWED_URL_HOSTS_RE.test(host) && !host.includes('.')) {
-    return NextResponse.json({ error: `Unsupported host: ${host}` }, { status: 400 });
+    await validateRemoteVideoUrl(url);
+  } catch (err) {
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : 'Invalid video URL' },
+      { status: 400 },
+    );
   }
 
   const settings = parseSettings({ ...body });
-  const job = queue.enqueue({ kind: 'url', url }, settings);
+  if (isDurableMode()) {
+    const job = await getDurablePlatform().createUrl(principal, url, settings);
+    return NextResponse.json({ job }, { status: 201 });
+  }
+  const job = queue.enqueue(
+    { kind: 'url', url },
+    settings,
+    { organizationId: principal.organizationId, workspaceId: principal.workspaceId, createdBy: principal.id },
+  );
+  queue.dispatch(job.id);
   return NextResponse.json({ job: toClientJob(queue.get(job.id)!) }, { status: 201 });
 }
 

@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useRef, useCallback } from 'react';
+import { ResumableUploadUnavailableError, uploadVideoResumably } from '@/lib/resumable-upload';
 import { useRouter } from 'next/navigation';
 import { WorkspaceShell } from '@/components/layout/workspace-shell';
 import { Button } from '@/components/ui/button';
@@ -16,7 +17,9 @@ const ALLOWED_EXTS = ['.mp4', '.mov', '.mkv', '.webm', '.avi', '.m4v'];
 export default function NewCapturePage() {
   const router = useRouter();
   const [submitting, setSubmitting] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const uploadAbortRef = useRef<AbortController | null>(null);
 
   // Upload state.
   const [file, setFile] = useState<File | null>(null);
@@ -59,7 +62,19 @@ export default function NewCapturePage() {
   const submitUpload = async () => {
     if (!file) return;
     setSubmitting(true);
+    setUploadProgress(0);
     setError(null);
+    const settings = {
+      smoothing,
+      hands,
+      format,
+      fps: fps ? Number(fps) : undefined,
+      minVisibility: Number(minVisibility),
+      groundLockFeet,
+      multipose,
+    };
+    const controller = new AbortController();
+    uploadAbortRef.current = controller;
     const fd = new FormData();
     fd.append('file', file);
     fd.append('smoothing', String(smoothing));
@@ -70,13 +85,30 @@ export default function NewCapturePage() {
     fd.append('multipose', String(multipose));
     if (fps) fd.append('fps', fps);
     try {
-      const r = await fetch('/api/jobs', { method: 'POST', body: fd });
-      const data = await r.json();
-      if (!r.ok) throw new Error(data.error ?? 'Failed to submit');
-      router.push(`/jobs/${data.job.id}`);
+      // Durable mode uses direct multipart uploads. File mode answers with a
+      // specific 409, in which case retain the legacy server-upload path.
+      let result: { job: { id: string } };
+      try {
+        result = await uploadVideoResumably(
+          file,
+          settings,
+          progress => setUploadProgress(progress.uploadedBytes / progress.totalBytes),
+          controller.signal,
+        );
+      } catch (uploadError) {
+        if (!(uploadError instanceof ResumableUploadUnavailableError)) throw uploadError;
+        const r = await fetch('/api/jobs', { method: 'POST', body: fd, signal: controller.signal });
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.error ?? 'Failed to submit');
+        result = data;
+      }
+      router.push(`/jobs/${result.job.id}`);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to submit');
       setSubmitting(false);
+      setUploadProgress(null);
+    } finally {
+      uploadAbortRef.current = null;
     }
   };
 
@@ -189,7 +221,9 @@ export default function NewCapturePage() {
             size="lg"
           >
             {submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Film className="h-4 w-4" />}
-            {submitting ? 'Starting…' : 'Start capture'}
+            {submitting
+              ? uploadProgress != null ? `Uploading ${Math.round(uploadProgress * 100)}%` : 'Starting…'
+              : 'Start capture'}
           </Button>
         </div>
       </div>

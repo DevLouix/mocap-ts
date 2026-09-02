@@ -1,0 +1,29 @@
+{
+  "name": "@mocap-ts/db",
+  "version": "0.1.0",
+  "private": true,
+  "description": "PostgreSQL persistence adapter for the mocap motion workspace.",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "src", "migrations"],
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "migrate": "node dist/migrate.js",
+    "clean": "rm -rf dist *.tsbuildinfo"
+  },
+  "dependencies": {
+    "pg": "^8.16.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/pg": "^8.15.5",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}

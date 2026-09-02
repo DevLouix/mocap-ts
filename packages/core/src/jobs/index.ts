@@ -16,3 +16,4 @@ export * from './queue.js';
 export * from './store.js';
 export * from './inngest-adapter.js';
 export * from './runner.js';
+export * from '../identity/index.js';

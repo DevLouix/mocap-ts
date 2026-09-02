@@ -1,0 +1,14 @@
+# Keep build context small; the image rebuilds everything it needs.
+node_modules
+**/node_modules
+**/dist
+**/.next
+**/.turbo
+.mocap
+**/.mocap
+.git
+Dockerfile
+docker-compose.yml
+.dockerignore
+*.log
+coverage

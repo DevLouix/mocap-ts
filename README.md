@@ -1,8 +1,8 @@
 # mocap-ts
 
-**Video → BVH motion capture, in pure TypeScript.**
+**Motion-production workspace, in pure TypeScript.**
 
-Drop in a video (or a YouTube URL), get out a `.bvh` file you can drag into Blender, Maya, MotionBuilder, or any DCC tool that understands BVH. No Python, no C++ build chain, no fragile native pipeline — just Node 20+ and ffmpeg.
+Turn video into reusable motion, apply it to your characters, compose scenes and timelines, create 3D videos, review versions, and export to Blender, Maya, Unreal, Unity, and other production tools. Video-to-BVH is the first processing capability inside the workspace, not the final product.
 
 [![CI](https://github.com/ellyseum/mocap_ts/actions/workflows/ci.yml/badge.svg)](https://github.com/ellyseum/mocap_ts/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
@@ -112,13 +112,90 @@ pnpm dev
 
 System deps for the worker are the same as the CLI (ffmpeg, optional yt-dlp).
 Job data lives under `MOCAP_DATA_DIR` (default `.mocap/`); override it for
-containers / persistent volumes via `apps/web/.env.example`.
+containers / persistent volumes. In file mode, the API stores uploads in
+`<data-root>/uploads` and the worker validates that same root, so set one
+shared absolute `MOCAP_DATA_DIR` when running processes from different
+working directories. Remote URLs use an approved-host allowlist
+and reject credentials, non-standard ports, and private/reserved DNS results.
+Set `MOCAP_ALLOWED_URL_HOSTS=example.com,media.example` only for domains you
+control and trust.
+
+**Authentication modes.** Local development and the single-workspace Docker
+profile use `MOCAP_AUTH_MODE=local`. Production should use
+`MOCAP_AUTH_MODE=header` behind a trusted OIDC/SAML-aware reverse proxy, set
+`MOCAP_AUTH_HEADER_SECRET`, and have that proxy strip client-supplied
+`x-mocap-*` identity headers before adding verified claims. The application
+scopes jobs and assets to the authenticated workspace; it does not treat a
+UUID as authorization. In durable header-auth mode, the effective role is also
+checked against the PostgreSQL workspace membership before each operation.
 
 **Architecture in brief.** Submitting creates a `Job`; a single worker loop
 (booted once via `instrumentation.ts`) claims queued jobs and runs the
 streaming pipeline, emitting `JobProgress` events the UI receives over SSE.
-The queue is a JSON-on-disk `FileJobQueue` by default — swap it for Inngest /
-BullMQ / Redis later by implementing the `JobQueue` interface in `packages/core`.
+The queue is a JSON-on-disk `FileJobQueue` by default for lightweight local
+work. For the durable self-hosted deployment, set `MOCAP_PERSISTENCE=durable`:
+job metadata is stored in PostgreSQL, media/artifacts in MinIO or any S3-
+compatible service, and execution is dispatched through Redis/BullMQ to the
+separate `apps/worker` process. The file queue is single-host infrastructure
+only; it must not be used as shared production storage.
+
+### Docker (self-hosting)
+
+ffmpeg + yt-dlp + the TF native stack are baked into the image, so the whole
+platform runs with no host installs:
+
+```bash
+pnpm platform:prod:start
+# → http://localhost:3000
+# MinIO console → http://localhost:9001
+```
+
+Platform lifecycle commands:
+
+```bash
+# Development: Next.js dev server + in-process file worker
+pnpm platform:dev:start
+pnpm platform:dev:status
+pnpm platform:dev:logs
+pnpm platform:dev:stop
+
+# Production: durable Docker Compose stack
+pnpm platform:prod:start       # builds and starts detached services
+pnpm platform:prod:status
+pnpm platform:prod:logs
+pnpm platform:prod:stop        # stops services; preserves named volumes
+pnpm platform:prod:restart
+```
+
+The equivalent generic form is `pnpm platform <dev|prod> <start|stop|restart|status|logs>`.
+The development controller stores its PID and log under `.mocap/platform/`.
+Production uses `docker compose stop` rather than removing containers or
+volumes; data deletion must be performed deliberately with Docker commands.
+
+For direct Docker usage, `docker compose up --build` remains supported.
+```
+
+The durable Compose profile persists PostgreSQL, Redis, and MinIO data in
+named volumes. Uploads and motion artifacts are stored in MinIO; job metadata
+is stored in PostgreSQL. The web service is the control plane and
+`apps/worker` is the independent processing plane. Large browser uploads use
+resumable S3 multipart sessions automatically; the server validates the final
+object before it becomes a processing job. `S3_PUBLIC_ENDPOINT` must be a
+browser-reachable S3 endpoint (the Compose default is `http://localhost:9000`).
+
+Durable workers use fenced PostgreSQL leases with heartbeats. A reaper
+re-queues expired attempts and terminally records exhausted attempts as dead
+letters. Owners/admins can inspect them at `GET /api/ops/dead-letters` and
+redrive one with `POST /api/ops/dead-letters/:id`; these endpoints require
+header-auth mode with a matching PostgreSQL workspace membership in production.
+Tune recovery with `MOCAP_LEASE_SECONDS` and `MOCAP_REAPER_INTERVAL_MS`.
+
+**YouTube bot checks.** From datacenter/cloud IPs, YouTube often answers URL
+downloads with *"Sign in to confirm you're not a bot"* — the app surfaces this
+as an explicit error with instructions. The fix is cookies, not retries:
+export `cookies.txt` (Netscape format) from a browser logged into YouTube and
+uncomment the two cookie lines in `docker-compose.yml`, or set
+`YTDLP_COOKIES_FILE=/path/to/cookies.txt` in any environment.
 
 ### Preview in Blender
 
@@ -175,12 +252,18 @@ Notion-style web frontend that drives it.
 └── pnpm-workspace.yaml
 ```
 
-**Why the split.** The core stays a clean, framework-free library (importable
-by the CLI, future CLIs, or any other host). The web app is a thin client over
-a job queue: uploads/URLs become jobs, a single background worker runs the
-pipeline with per-stage progress, and the UI streams that progress over SSE.
-The TF.js native stack is isolated to the worker entrypoint via a TF-free
-`jobs/queue` subpath, so route handlers never bundle it.
+**Why the split.** The core stays a clean, framework-free library (importable by the CLI, future
+workers, render services, or any other host). The web app is evolving into a
+control plane for a project-based motion workspace. The current job queue is
+for local development; the enterprise path moves metadata to PostgreSQL,
+media to object storage, execution to durable queues and isolated workers, and
+progress to a shared event stream. The product domain contracts live in
+`@mocap-ts/core/workspace` so captures, motion takes, characters, scenes,
+timelines, renders, exports, reviews, and versions do not become fields on one
+catch-all job record.
+
+See [`docs/platform-roadmap.md`](./docs/platform-roadmap.md) for the target
+architecture, threat model, product workflows, and phased development plan.
 
 ### Testing philosophy
 
@@ -199,9 +282,14 @@ Math and pure-function modules (`vector3`, `quaternion`, `smoother`, `bvh`, `map
 - [x] glTF character import (drop .glb in `apps/web/public/assets/characters/`)
 - [x] Exact ZXY-intrinsic BVH retargeting (mirrors the core writer)
 - [x] Inngest JobQueue adapter (env-gated `MOCAP_QUEUE=inngest`)
-- [ ] Multi-host worker (Redis-backed queue + N worker processes)
+- [x] Multi-host worker foundation (Redis/BullMQ + independent CPU worker process)
 - [ ] FBX skinning/deformer (currently skeleton-only FBX)
 - [ ] In-browser capture (camera → pose estimation via WebGPU)
+- [x] Production workspace domain contracts (`@mocap-ts/core/workspace`)
+- [x] PostgreSQL + object storage + durable worker plane foundation
+- [ ] Non-destructive timeline editor and asynchronous 3D video rendering
+- [ ] Organization security, review, versioning, APIs, and integrations
+- [x] Phase 0 tenant boundary, URL policy, upload validation, retries, cancellation, and cleanup
 
 ## Contributing
 

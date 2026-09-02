@@ -46,7 +46,7 @@ export function isVideoUrl(input: string): boolean {
  */
 export function downloadVideo(
   url: string,
-  options: { outDir?: string; verbose?: boolean } = {},
+  options: { outDir?: string; verbose?: boolean; cookieFile?: string } = {},
 ): { videoPath: string; title: string } {
   const outDir = options.outDir ?? mkdtempSync(join(tmpdir(), 'mocap-dl-'));
 
@@ -92,10 +92,27 @@ export function downloadVideo(
     args.unshift('--quiet');
   }
 
-  execFileSync(bin, args, {
-    stdio: options.verbose ? 'inherit' : 'pipe',
-    timeout: 300000, // 5 minutes max
-  });
+  // Pass browser cookies when available. YouTube (and other sites) routinely
+  // bot-check datacenter IPs; cookies from a logged-in browser session are
+  // the standard workaround. Resolution order:
+  //   1. explicit option, 2. YTDLP_COOKIES_FILE env, 3. <data root>/cookies.txt
+  const cookieFile = options.cookieFile
+    ?? process.env.YTDLP_COOKIES_FILE
+    ?? join(process.env.MOCAP_DATA_DIR ?? join(process.cwd(), '.mocap'), 'cookies.txt');
+  if (existsSync(cookieFile)) {
+    args.unshift('--cookies', cookieFile);
+    if (options.verbose) console.error(`[mocap-ts] Using cookies: ${cookieFile}`);
+  }
+
+  try {
+    execFileSync(bin, args, {
+      encoding: 'utf-8',
+      timeout: 300000, // 5 minutes max
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  } catch (err) {
+    throw explainYtDlpError(err, url);
+  }
 
   // Find the downloaded file
   const files = readdirSync(outDir).filter(f =>
@@ -110,6 +127,52 @@ export function downloadVideo(
   if (options.verbose) console.error(`[mocap-ts] Downloaded: ${videoPath}`);
 
   return { videoPath, title };
+}
+
+/**
+ * Translate a raw yt-dlp failure into an actionable error message.
+ *
+ * The most common case by far: YouTube's bot check on datacenter IPs
+ * ("Sign in to confirm you're not a bot"), which is fixed by supplying
+ * cookies — not by retrying.
+ */
+function explainYtDlpError(err: unknown, url: string): Error {
+  const e = err as { stderr?: string | Buffer; stdout?: string | Buffer; message?: string };
+  const stderr = [e.stderr, e.stdout, e.message]
+    .map(p => (typeof p === 'string' ? p : Buffer.isBuffer(p) ? p.toString('utf-8') : ''))
+    .join('\n');
+  const tail = stderr.trim().split('\n').slice(-6).join('\n');
+
+  if (/sign in to confirm|not a bot/i.test(stderr)) {
+    return new Error(
+      'The video host is asking this server to sign in (bot check). This is ' +
+      'typical for datacenter/cloud IPs on YouTube.\n' +
+      'Fix: export cookies from a browser logged into YouTube and point the ' +
+      'app at them:\n' +
+      '  1. In a logged-in browser, save cookies.txt (Netscape format), e.g. with ' +
+      'the "Get cookies.txt" extension.\n' +
+      '  2. Set YTDLP_COOKIES_FILE=/path/to/cookies.txt for the server ' +
+      '(or place it at <data dir>/cookies.txt, e.g. .mocap/cookies.txt).\n' +
+      '  3. Re-submit the job.\n' +
+      'See https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp',
+    );
+  }
+  if (/sign in to confirm your age|age.?restricted/i.test(stderr)) {
+    return new Error(
+      'This video is age-restricted, which requires authenticated cookies.\n' +
+      'Set YTDLP_COOKIES_FILE (see README) with a logged-in account and retry.',
+    );
+  }
+  if (/private video|video unavailable|members-only/i.test(stderr)) {
+    return new Error(`The video at ${url} is private, unavailable, or members-only.`);
+  }
+  if (/http error 429|too many requests/i.test(stderr)) {
+    return new Error(
+      'The video host is rate-limiting this server (HTTP 429). Wait and retry, ' +
+      'or use cookies (YTDLP_COOKIES_FILE).',
+    );
+  }
+  return new Error(`yt-dlp failed for ${url}.\n${tail}`);
 }
 
 /** Try to find a binary in PATH. */
